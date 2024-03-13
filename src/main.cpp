@@ -3,81 +3,70 @@
 #include "freertos/FreeRTOS.h"
 
 
-                                                                // Variables for User
 
+// Variables for User
 #define ProbePin 34
 
 
-
-                                                                // Variables for Programmer
-
+// Variables
 static const BaseType_t procpu = 0;
 static const BaseType_t appcpu = 1;
 
-static uint8_t samples_required = 0;
 hw_timer_t *timer_sample_rate = NULL;
 TaskHandle_t serial_reader_taskhandle = NULL, sampler_serial_writer_taskhandle = NULL;
-portMUX_TYPE spinlock = portMUX_INITIALIZER_UNLOCKED;
+// portMUX_TYPE spinlock = portMUX_INITIALIZER_UNLOCKED;
 
-
-
-
-
-                                                                 // Functions
-
+// Functions
 void IRAM_ATTR sample_request();
-void serial_reader(void * param);
-void sampler_serial_writer(void * param);
+void serial_reader(void *param);
+void sampler_serial_writer(void *param);
 
 
 void setup()
 {
-  pinMode(ProbePin,INPUT);
   // Set pin funtion
+  pinMode(ProbePin, INPUT);
 
   Serial.begin(921600);
-  vTaskDelay(50/portTICK_PERIOD_MS);
   // 500 ms of delay
+  vTaskDelay(50 / portTICK_PERIOD_MS);
 
-  timer_sample_rate = timerBegin(1,80,pdTRUE);
+  // The hardware timer for constant sample rate
+  timer_sample_rate = timerBegin(1, 80, pdTRUE);
   timerAttachInterrupt(timer_sample_rate, &sample_request, pdTRUE);
-  timerAlarmWrite(timer_sample_rate, 1000, pdTRUE);
-  // The hardware timer tick rate is 1 us. 130 microseconds means 0.13 milliseconds of timer interval per sample.
+  timerAlarmWrite(timer_sample_rate, 500, pdTRUE);
 
-
+  // Task to Sample Data
   xTaskCreatePinnedToCore(sampler_serial_writer, "Sampler and Serial Writer", 4000, NULL, 1, &sampler_serial_writer_taskhandle, appcpu);
   vTaskSuspend(sampler_serial_writer_taskhandle);
-  // This task is created to read data and send to serial port.
+
+  // Task to Read Command
   xTaskCreatePinnedToCore(serial_reader, "Serial Reader", 4000, NULL, 1, &serial_reader_taskhandle, appcpu);
-  // This task is created to read command from the Oscilloscope Program.
-
 }
-
 void loop()
 {
-  // This will probably be deleted.
-    vTaskDelete(NULL);
+  // This will be deleted.
+  vTaskDelete(NULL);
 }
 
-
-                                                          // Tasks and Functions defined:
-
+// Tasks and Functions defined:
 void IRAM_ATTR sample_request()
 {
-  // This indicates its time to sample new data. It is 8-bit U-Int, in case the data sampling is slower than handware timer.
-  // => Expected value of this variable = 0/1
+  BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 
-  portENTER_CRITICAL_ISR(&spinlock);
-  samples_required += 1;
-  portEXIT_CRITICAL_ISR(&spinlock);
+  // Gives notification to the Sampler Task
+  vTaskNotifyGiveFromISR(sampler_serial_writer_taskhandle, &xHigherPriorityTaskWoken);
 
-
+  // Context Switching
+  if (xHigherPriorityTaskWoken)
+  {
+    portYIELD_FROM_ISR();
+  }
 }
 
-
-void serial_reader(void * param)
+void serial_reader(void *param)
 {
-  while(1)
+  while (1)
   {
     if (Serial.available())
     {
@@ -87,51 +76,35 @@ void serial_reader(void * param)
 
       if (command_input == "START")
       {
+        vTaskResume(sampler_serial_writer_taskhandle);
+        // Resume the sampler_serial_writer
         timerAlarmEnable(timer_sample_rate);
         // Start Hardware Interrupt
-        vTaskResume(sampler_serial_writer_taskhandle);
-        // Also resume the sampler_serial_writer
       }
       else if (command_input == "STOP")
       {
+        vTaskSuspend(sampler_serial_writer_taskhandle);
+        // Suspend the sampler_serial_writer
         timerAlarmDisable(timer_sample_rate);
         // Stop Hardware Interrupt
-        vTaskSuspend(sampler_serial_writer_taskhandle);
-        // Also suspend the sampler_serial_writer
       }
     }
 
-    vTaskDelay(10/portTICK_PERIOD_MS);
+    vTaskDelay(15 / portTICK_PERIOD_MS);
   }
 }
 
-
-void sampler_serial_writer(void * param)
+void IRAM_ATTR sampler_serial_writer(void *param)
 {
   static uint16_t data;
   // Static local variable as continuous data sampling is required.
 
-  while(1)
+  while (1)
   {
-    vTaskDelay(1/portTICK_PERIOD_MS);
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    // pdTrue clears the notification count
 
-    if (samples_required)
-    {
-      // Serial.println(samples_required);
-      data = analogRead(ProbePin);
-      Serial.println(data);
-
-      // => Expected values = 0/1
-      portENTER_CRITICAL_ISR(&spinlock);
-      samples_required -= 1;
-      portEXIT_CRITICAL_ISR(&spinlock);
-      // Everytime a new data is sampled, the number of required samples should be decreased.
-
-    }
-
+    data = analogRead(ProbePin);
+    Serial.println(data);
   }
 }
-
-
-
-
